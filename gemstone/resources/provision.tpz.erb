@@ -1,0 +1,33 @@
+! In GemStone/S 64 Bit we respond to a provisioning request by adding a user
+! output pushnew provision.out
+!
+run
+| securityPolicy newUser |
+securityPolicy := (GsObjectSecurityPolicy newInRepository: SystemRepository)
+  ownerAuthorization: #'write';
+  worldAuthorization: #'none';
+  yourself.
+System commitTransaction.
+newUser := AllUsers 
+  userWithId: '<%= provisioned_service.user %>' 
+  ifAbsent: [ nil ].
+newUser ~~ nil ifTrue: [
+  AllUsers removeAndCleanup: newUser.
+  System commitTransaction.
+].
+newUser := AllUsers
+  addNewUserWithId: '<%= provisioned_service.user %>'
+  password: '<%= provisioned_service.pass %>'
+  defaultObjectSecurityPolicy: securityPolicy
+  privileges: #(
+    #'CodeModification' 
+    #'NoPerformOnServer' 
+    #'NoUserAction'
+    #'NoGsFileOnServer'
+    #'NoGsFileOnClient')
+  inGroups: #().
+securityPolicy owner: newUser.
+System commitTransaction.
+%
+logout
+exit

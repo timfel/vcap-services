@@ -1,0 +1,13 @@
+! We respond to an uprovisioning request by removing a user
+! output pushnew unprovision.out
+!
+run
+| user |
+user := AllUsers 
+  userWithId: '<%= provisioned_service.user %>' 
+  ifAbsent: [^true].
+AllUsers removeAndCleanup: user.
+System commitTransaction.
+%
+logout
+exit
