@@ -1,6 +1,8 @@
 ! We respond to an uprovisioning request by removing a user
 ! output pushnew unprovision.out
 !
+set gems <%= provisioned_service.gems %>
+login
 run
 | user |
 user := AllUsers 

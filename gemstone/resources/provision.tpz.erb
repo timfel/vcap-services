@@ -1,6 +1,8 @@
 ! In GemStone/S 64 Bit we respond to a provisioning request by adding a user
 ! output pushnew provision.out
 !
+set gems <%= provisioned_service.gems %>
+login
 run
 | securityPolicy newUser |
 securityPolicy := (GsObjectSecurityPolicy newInRepository: SystemRepository)

@@ -31,6 +31,7 @@ class VCAP::Services::Gemstone::Node
     property :plan, Integer, :required => true
     property :user, String,  :required => true
     property :pass, String,  :required => true
+    property :gems, String,  :required => true
   end
 
   # +options+ includes the info in ../../config/gemstone_node.yml
@@ -66,13 +67,13 @@ class VCAP::Services::Gemstone::Node
   
   def announcement
     a = {
-      :some_random_data => 42,
+      :available_capacity => 42,
     }
   end
 
   def provision(plan, credential=nil)
     provisioned_service = ProvisionedService.new
-    provisioned_service.plan = plan
+    provisioned_service.plan = 1
     if credential
       provisioned_service.name = credential[:name]
       provisioned_service.user = credential[:user]
@@ -82,13 +83,14 @@ class VCAP::Services::Gemstone::Node
       provisioned_service.user = 'CF-' + generate_credential
       provisioned_service.pass = generate_credential
     end
+    provisioned_service.gems = "!tcp@" + @local_ip + "#server!gs64stone"
 
-    `#{@GEMSTONE}/bin/topaz_dc <<EOF
+    `#{@GEMSTONE}/bin/topaz -I #{@GEMSTONE}/bin/datacurator.tpz <<EOF
 #{@provision_template.result(binding)}
 EOF`
 
     if not provisioned_service.save
-      @logger.error("Could not save entry: #{provisoned_service.errors.inspect}")
+      @logger.error("Could not save entry: #{provisioned_service.errors.inspect}")
       raise GemstoneError.new(GemstoneError::GSS_LOCAL_DB_ERROR)
     end
 
@@ -106,7 +108,7 @@ EOF`
     provisioned_service = ProvisionedService.get(name)
     raise GemstoneError.new(GemstoneError::GSS_LOCAL_DB_ERROR) if provisioned_service.nil?
 
-    `#{@GEMSTONE}/bin/topaz_dc <<EOF
+    `#{@GEMSTONE}/bin/topaz -I #{@GEMSTONE}/bin/datacurator.tpz <<EOF
 #{@unprovision_template.result(binding)}
 EOF`
 
@@ -124,6 +126,7 @@ EOF`
       "pass" => provisioned_service.pass,
       "host" => @local_ip,
       "port" => 0,
+      "gems" => provisioned_service.gems,
     }
   end
 
