@@ -1,19 +1,17 @@
 ---
-# cloud_controller_uri: api.vcap.me
+cloud_controller_uri: api.vcap.me
 service:
   name: gemstone
-  version: "3.0"
+  version: '3.0.1'
   description: 'GemStone/S 64 Bit database service'
   plans: ['free']
-  tags: ['gemstone', 'gemstone-3.0', 'object']
+  default_plan: free
+  tags: ['gemstone', 'gemstone-3.0.1', 'objects']
 ip_route: localhost
 index: 0
-token: "0xdeadbeef"
+token: 'swordfish'
 logging:
   level: debug
 mbus: nats://localhost:4222
 pid: /var/vcap/sys/run/gemstone_service.pid
-resque:
-  host: localhost
-  port: 5454
-upload_temp_dir: /tmp
+node_timeout: 2

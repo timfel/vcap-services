@@ -2,7 +2,8 @@
 require "erb"
 require "fileutils"
 require "logger"
-require "pp"
+require "datamapper"	# included in echo demo
+require "pp"		# not in echo demo
 require "uuidtools"
 
 module VCAP
@@ -15,7 +16,7 @@ module VCAP
 end
 
 require "gemstone_service/common"
-require "gemstone_service/error"
+require "gemstone_service/gemstone_error"
 
 class VCAP::Services::Gemstone::Node
   include VCAP::Services::Gemstone::Common
@@ -27,8 +28,6 @@ class VCAP::Services::Gemstone::Node
   class ProvisionedService
     include DataMapper::Resource
     property :name, String,  :key => true
-    # property plan is deprecated. The instances in one node have same plan.
-    property :plan, Integer, :required => true
     property :user, String,  :required => true
     property :pass, String,  :required => true
     property :gems, String,  :required => true
@@ -37,12 +36,14 @@ class VCAP::Services::Gemstone::Node
   # +options+ includes the info in ../../config/gemstone_node.yml
   def initialize(options)
     super(options) # handles @node_id, @logger, @local_ip, @node_nats
+
     template_path = File.expand_path('../../resources/provision.tpz.erb', File.dirname(__FILE__))
     @provision_template = ERB.new(File.read(template_path))
     template_path = File.expand_path('../../resources/unprovision.tpz.erb', File.dirname(__FILE__))
     @unprovision_template = ERB.new(File.read(template_path))
     @GEMSTONE = options[:base_dir]
     @local_db = options[:local_db]
+    @supported_versions = ["3.0.1"]
   end
 
   def pre_send_announcement
@@ -71,9 +72,8 @@ class VCAP::Services::Gemstone::Node
     }
   end
 
-  def provision(plan, credential=nil)
+  def provision(plan, credential=nil, version=nil)
     provisioned_service = ProvisionedService.new
-    provisioned_service.plan = 1
     if credential
       provisioned_service.name = credential[:name]
       provisioned_service.user = credential[:user]
@@ -119,7 +119,12 @@ EOF`
   end
 
   def bind(name, bind_opts, credential=nil)
-    provisioned_service = ProvisionedService.get(name)
+    provisioned_service = nil
+    if credential
+	    provisioned_service = ProvisionedService.get(credential["name"])
+	else
+	    provisioned_service = ProvisionedService.get(name)
+	end
     raise GemstoneError.new(GemstoneError::GSS_LOCAL_DB_ERROR) if provisioned_service.nil?
     response = {
       "user" => provisioned_service.user,

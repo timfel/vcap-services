@@ -1,13 +1,11 @@
 ---
-capacity: 200
 plan: free
+capacity: 100
 local_db: sqlite3:/var/vcap/services/gemstone/gemstone_node.db
 mbus: nats://localhost:4222
-index: 0
 base_dir: /var/vcap/services/gemstone/
-ip_route: 127.0.0.1
+index: 0
 logging:
   level: debug
 pid: /var/vcap/sys/run/gemstone_node.pid
 node_id: gemstone_node_1
-migration_nfs: /mnt/migration
