@@ -10,10 +10,19 @@ logging:
   level: debug
 mongod_log_dir: /var/vcap/sys/log/mongodb
 pid: /var/vcap/sys/run/mongodb_node.pid
-max_memory: 128
 node_id: mongodb_node_free_1
-mongod_path: mongod
-mongorestore_path: mongorestore
+
+supported_versions: ["1.8"]
+default_version: "1.8"
+
+mongod_path:
+  "1.8": "mongod"
+mongorestore_path:
+  "1.8": "mongorestore"
+
+mongod_options:
+  "1.8": ""
+
 port_range:
   first: 25001
   last: 45000
@@ -21,3 +30,5 @@ migration_nfs: /mnt/migration
 # max_clients: 500
 # z_interval: 30
 # max_nats_payload: 1048576
+# fqdn_hosts: false
+# op_time_limit: 6

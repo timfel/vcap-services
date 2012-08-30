@@ -49,6 +49,25 @@ class VCAP::Services::Redis::Node
     def running?
       VCAP.process_running? pid
     end
+
+    def kill(sig=:SIGTERM)
+      @wait_thread = Process.detach(pid)
+      Process.kill(sig, pid) if running?
+    end
+
+    def wait_killed(timeout=5, interval=0.2)
+      begin
+        Timeout::timeout(timeout) do
+          @wait_thread.join if @wait_thread
+          while running? do
+            sleep interval
+          end
+        end
+      rescue Timeout::Error
+        return false
+      end
+      true
+    end
   end
 
   def initialize(options)
@@ -73,6 +92,8 @@ class VCAP::Services::Redis::Node
     # Timeout for redis client operations, node cannot be blocked on any redis instances.
     # Default value is 2 seconds.
     @redis_timeout = @options[:redis_timeout] || 2
+    @redis_start_timeout = @options[:redis_start_timeout] || 3
+    @supported_versions = ["2.2"]
   end
 
   def pre_send_announcement
@@ -91,11 +112,12 @@ class VCAP::Services::Redis::Node
 
   def announcement
     @capacity_lock.synchronize do
-      { :available_capacity => @capacity }
+      { :available_capacity => @capacity,
+        :capacity_unit => capacity_unit }
     end
   end
 
-  def provision(plan, credentials = nil, db_file = nil)
+  def provision(plan, credentials = nil, version=nil, db_file = nil)
     raise RedisError.new(RedisError::REDIS_INVALID_PLAN, plan) unless plan.to_s == @plan
     instance = ProvisionedService.new
     instance.plan = 1
@@ -139,8 +161,6 @@ class VCAP::Services::Redis::Node
       raise e1
     end
 
-    # Sleep 1 second to wait for redis instance start
-    sleep 1
     gen_credentials(instance)
   end
 
@@ -190,26 +210,24 @@ class VCAP::Services::Redis::Node
   def disable_instance(service_credentials, binding_credentials_list = [])
     set_config(service_credentials["port"], service_credentials["password"], "requirepass", @disable_password)
     true
+  rescue => e
+    @logger.warn(e)
+    nil
   end
 
-  # This function may run in old node or new node, it does these things:
-  # 1. Try to use password in credentials to connect to redis instance
-  # 2. If connection failed, then it's the old node,
-  #    since the password old node is changed to deny then access,
-  #    if successed, then it's the new node.
-  # 3. For old node, it should restore the password,
-  #    for new node, nothing need to do, all are done in import_instance.
   def enable_instance(service_credentials, binding_credentials_map = {})
+    set_config(service_credentials["port"], @disable_password, "requirepass", service_credentials["password"])
+    true
+  rescue => e
+    @logger.warn(e)
+    nil
+  end
+
+  def update_instance(service_credentials, binding_credentials_map = {})
     instance = get_instance(service_credentials["name"])
-    if check_password(instance.port, instance.password)
-      # The new node
-      service_credentials = gen_credentials(instance)
-      binding_credentials_map.each do |key, value|
-        binding_credentials_map[key]["credentials"] = gen_credentials(instance)
-      end
-    else
-      # The old node
-      set_config(service_credentials["port"], @disable_password, "requirepass", service_credentials["password"])
+    service_credentials = gen_credentials(instance)
+    binding_credentials_map.each do |key, value|
+      binding_credentials_map[key]["credentials"] = gen_credentials(instance)
     end
     [service_credentials, binding_credentials_map]
   rescue => e
@@ -228,7 +246,10 @@ class VCAP::Services::Redis::Node
 
   def import_instance(service_credentials, binding_credentials_map={}, dump_dir, plan)
     db_file = File.join(dump_dir, "dump.rdb")
-    provision(plan, service_credentials, db_file)
+    # FIXME: We set the version to nil here so that the instance is imported to the default version of redis.
+    # TODO: Fix this behaviour (E.g. add version information to dump so that a correct version of redis can be provisioned
+    provision(plan, service_credentials, nil, db_file)
+    true
   rescue => e
     @logger.warn(e)
     nil
@@ -248,22 +269,14 @@ class VCAP::Services::Redis::Node
       varz[:provisioned_instances] << get_varz(instance)
       varz[:provisioned_instances_num] += 1
     end
+    varz[:instances] = {}
+    ProvisionedService.all.each do |instance|
+      varz[:instances][instance.name.to_sym] = get_status(instance)
+    end
     varz
   rescue => e
     @logger.warn("Error while getting varz details: #{e}")
     {}
-  end
-
-  def healthz_details
-    healthz = {}
-    healthz[:self] = "ok"
-    ProvisionedService.all.each do |instance|
-      healthz[instance.name.to_sym] = get_healthz(instance)
-    end
-    healthz
-  rescue => e
-    @logger.warn("Error while getting healthz details: #{e}")
-    {:self => "fail"}
   end
 
   def start_db
@@ -284,16 +297,10 @@ class VCAP::Services::Redis::Node
           next
         end
         begin
-          pid = start_instance(instance)
-          instance.pid = pid
+          instance.pid = start_provisioned_instance(instance)
           save_instance(instance)
         rescue => e
           @logger.warn("Error starting instance #{instance.name}: #{e}")
-          begin
-            cleanup_instance(instance)
-          rescue => e2
-            # Ignore the rollback exception
-          end
         end
       end
     end
@@ -301,10 +308,12 @@ class VCAP::Services::Redis::Node
 
   def save_instance(instance)
     raise RedisError.new(RedisError::REDIS_SAVE_INSTANCE_FAILED, instance.inspect) unless instance.save
+    true
   end
 
   def destroy_instance(instance)
-    raise RedisError.new(RedisError::REDIS_DESTORY_INSTANCE_FAILED, instance.inspect) unless instance.destroy
+    raise RedisError.new(RedisError::REDIS_DESTORY_INSTANCE_FAILED, instance.inspect) unless instance.new? || instance.destroy
+    true
   end
 
   def get_instance(name)
@@ -319,9 +328,14 @@ class VCAP::Services::Redis::Node
     pid = fork
     if pid
       @logger.debug("Service #{instance.name} started with pid #{pid}")
-      # In parent, detch the child.
+      # In parent, detch the child
       Process.detach(pid)
-      pid
+      return pid if wait_service_start(instance)
+      @logger.error("Timeout to start redis server for instance #{instance.name}")
+      # Stop the instance if it is running
+      instance.pid = pid
+      stop_instance(instance) if instance.running?
+      raise RedisError.new(RedisError::REDIS_START_INSTANCE_FAILED, instance.inspect)
     else
       $0 = "Starting Redis instance: #{instance.name}"
       close_fds
@@ -357,6 +371,50 @@ class VCAP::Services::Redis::Node
     end
   rescue => e
     raise RedisError.new(RedisError::REDIS_START_INSTANCE_FAILED, instance.inspect)
+  end
+
+  def start_provisioned_instance(instance)
+    @logger.debug("Starting: #{instance.inspect} on port #{instance.port}")
+
+    pid = fork
+    if pid
+      @logger.debug("Service #{instance.name} started with pid #{pid}")
+      # In parent, detch the child
+      Process.detach(pid)
+      # Just record a timeout error here, the instance could finish starting eventually,
+      # or the node will report error in varz details
+      @logger.error("Timeout to start redis server for instance #{instance.name}") unless wait_service_start(instance)
+      return pid
+    else
+      $0 = "Starting Redis instance: #{instance.name}"
+      close_fds
+
+      dir = instance_dir(instance.name)
+      config_path = File.join(dir, "redis.conf")
+      exec("#{@redis_server_path} #{config_path}")
+    end
+  rescue => e
+    raise RedisError.new(RedisError::REDIS_START_INSTANCE_FAILED, instance.inspect)
+  end
+
+  def wait_service_start(instance)
+    # Wait enough time for the redis server starting
+    redis = Redis.new({:port => instance.port, :password => instance.password})
+    (@redis_start_timeout * 10).times do
+      begin
+        redis.echo("")
+        return true
+      rescue => e
+        sleep 0.1
+        next
+      ensure
+        begin
+          redis.quit if redis
+        rescue => e
+        end
+      end
+    end
+    false
   end
 
   def stop_instance(instance)
@@ -407,16 +465,18 @@ class VCAP::Services::Redis::Node
   end
 
   def gen_credentials(instance)
+    host = get_host
     credentials = {
-      "hostname" => @local_ip,
-      "host" => @local_ip,
+      "hostname" => host,
+      "host" => host,
       "port" => instance.port,
       "password" => instance.password,
       "name" => instance.name
     }
   end
 
-  def get_healthz(instance)
+  def get_status(instance)
+    redis = nil
     Timeout::timeout(@redis_timeout) do
       redis = Redis.new({:port => instance.port, :password => instance.password})
       redis.echo("")

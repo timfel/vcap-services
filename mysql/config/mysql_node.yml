@@ -16,6 +16,7 @@ node_id: mysql_node_free_1
 max_db_size: 20
 max_long_query: 3
 max_long_tx: 30
+kill_long_tx: true
 max_user_conns: 20
 migration_nfs: /mnt/migration
 mysql:
@@ -23,6 +24,11 @@ mysql:
   port: 3306
   user: root
   pass: root
+connection_pool_size: 5
+# connection timeout for all management mysql connection
+connection_wait_timeout: 10
 
 # z_interval: 30
 # max_nats_payload: 1048576
+# fqdn_hosts: false
+# op_time_limit: 6

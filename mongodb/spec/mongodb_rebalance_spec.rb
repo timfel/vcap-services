@@ -12,9 +12,10 @@ describe "mongodb rebalance" do
       @app_id = "myapp"
       @opts = get_node_config()
       @logger = @opts[:logger]
+      @default_version = @opts[:default_version]
 
       @node = Node.new(@opts)
-      @resp = @node.provision("free")
+      @resp = @node.provision("free", nil, @default_version)
 
       EM.add_timer(1) do
         @bind_resp = @node.bind(@resp['name'], 'rw')
@@ -39,6 +40,20 @@ describe "mongodb rebalance" do
   end
 
   it "should be able to connect to mongodb" do
+    is_port_open?('127.0.0.1', @resp['port']).should be_true
+  end
+
+  it "should be able to enable instance" do
+    @node.disable_instance(
+            @resp,
+            { '' => { 'credentials' => @bind_resp } },
+          )
+    res = @node.enable_instance(
+            @resp,
+            { '' => { 'credentials' => @bind_resp } },
+          )
+    res.should == true
+    sleep 1
     is_port_open?('127.0.0.1', @resp['port']).should be_true
   end
 
@@ -86,10 +101,10 @@ describe "mongodb rebalance" do
     end
   end
 
-  it "should be able to enable instance" do
+  it "should be able to update instance handles" do
     EM.run do
       EM.add_timer(1) do
-        res = @node.enable_instance(
+        res = @node.update_instance(
                 @resp,
                 { '' => { 'credentials' => @bind_resp } }
               )

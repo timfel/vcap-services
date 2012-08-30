@@ -5,6 +5,7 @@ require 'mysql_service/node'
 require 'mysql_service/mysql_error'
 require 'mysql2'
 require 'yajl'
+require 'fileutils'
 
 
 module VCAP
@@ -38,6 +39,7 @@ describe "Mysql server node" do
       @node = Node.new(@opts)
       EM.add_timer(1) { EM.stop }
     end
+    @tmpfiles = []
   end
 
   before :each do
@@ -123,14 +125,22 @@ describe "Mysql server node" do
           expect{ conn.query("insert into test value('test')")}.should raise_error(Mysql2::Error)
           conn2 = connect_to_mysql(@db)
           expect{ conn.query("insert into test value('test')")}.should raise_error(Mysql2::Error)
-          conn.query("delete from test")
+          # new binding's write privilege should also be revoked.
+          new_binding = node.bind(@db['name'], @default_opts)
+          @test_dbs[@db] << new_binding
+          new_conn = connect_to_mysql(new_binding)
+          expect { new_conn.query("insert into test value('new_test')")}.should raise_error(Mysql2::Error)
           EM.add_timer(3) do
             expect {conn.query('SELECT 1')}.should raise_error
             conn.close
             conn = connect_to_mysql(binding)
+            conn.query("delete from test")
             # write privilege should restore
-            expect{ conn.query("insert into test value('test')")}.should_not raise_error
-            EM.stop
+            EM.add_timer(2) do
+              conn = connect_to_mysql(binding)
+              expect{ conn.query("insert into test value('test')")}.should_not raise_error
+              EM.stop
+            end
           end
         end
       end
@@ -273,10 +283,29 @@ describe "Mysql server node" do
           conn.query("insert into a value(10)")
           conn.query("begin")
           conn.query("select * from a for update")
+          old_killed = node.varz_details[:long_transactions_killed]
           EM.add_timer(opts[:max_long_tx] * 5) {
             expect {conn.query("select * from a for update")}.should raise_error(Mysql2::Error)
             conn.close
-            EM.stop
+            node.varz_details[:long_transactions_killed].should > old_killed
+
+            node.instance_variable_set(:@kill_long_tx, false)
+            conn = connect_to_mysql(@db)
+            # prepare a transaction and not commit
+            conn.query("begin")
+            conn.query("select * from a for update")
+            old_counter = node.varz_details[:long_transactions_count]
+            EM.add_timer(opts[:max_long_tx] * 5) {
+              expect {conn.query("select * from a for update")}.should_not raise_error(Mysql2::Error)
+              node.varz_details[:long_transactions_count].should > old_counter
+              old_counter = node.varz_details[:long_transactions_count]
+              EM.add_timer(opts[:max_long_tx] * 5) {
+                #counter should not double-count the same long transaction
+                node.varz_details[:long_transactions_count].should == old_counter
+                conn.close
+                EM.stop
+              }
+            }
           }
         end
       end
@@ -399,20 +428,78 @@ describe "Mysql server node" do
       @test_dbs[db] = []
       conn = connect_to_mysql(db)
       conn.query("create table test(id INT)")
+      conn.query("create procedure defaultfunc(out defaultcount int) begin select count(*) into defaultcount from test; end")
+      binding = @node.bind(db['name'], @default_opts)
+      new_binding = @node.bind(db['name'], @default_opts)
+      @test_dbs[db] << binding
+      @test_dbs[db] << new_binding
+
+      # create stored procedure
+      bind_conn = connect_to_mysql(binding)
+      new_bind_conn = connect_to_mysql(new_binding)
+      bind_conn.query("create procedure myfunc(out mycount int) begin  select count(*) into mycount from test ; end")
+      bind_conn.query("create procedure myfunc2(out mycount int) SQL SECURITY invoker begin select count(*) into mycount from test;end")
+      new_bind_conn.query("create procedure myfunc3(out mycount int) begin select count(*) into mycount from test; end")
+      new_bind_conn.close if new_bind_conn
+      @node.unbind(new_binding)
+      conn.query("call defaultfunc(@testcount)")
+      conn.query("select @testcount")
+      conn.query("call myfunc(@testcount)")
+      conn.query("select @testcount")
+      conn.query("call myfunc2(@testcount)")
+      conn.query("select @testcount")
+      conn.query("call myfunc3(@testcount)")
+      conn.query("select @testcount")
+      bind_conn.query("call defaultfunc(@testcount)")
+      bind_conn.query("select @testcount")
+      bind_conn.query("call myfunc(@testcount)")
+      bind_conn.query("select @testcount")
+      bind_conn.query("call myfunc2(@testcount)")
+      bind_conn.query("select @testcount")
+      bind_conn.query("call myfunc3(@testcount)")
+      bind_conn.query("select @testcount")
+
+
       # backup current db
       host, port, user, password = %w(host port user pass).map{|key| @opts[:mysql][key]}
       tmp_file = "/tmp/#{db['name']}.sql.gz"
-      result = `mysqldump -h #{host} -P #{port} -u #{user} --password=#{password} #{db['name']} | gzip > #{tmp_file}`
+      @tmpfiles << tmp_file
+      result = `mysqldump -h #{host} -P #{port} --user='#{user}' --password='#{password}' -R #{db['name']} | gzip > #{tmp_file}`
+      bind_conn.query("drop procedure myfunc")
       conn.query("drop table test")
+      res = bind_conn.query("show procedure status")
+      res.count().should == 3
       res = conn.query("show tables")
       res.count.should == 0
+
       # create a new table which should be deleted after restore
       conn.query("create table test2(id int)")
+      bind_conn.close if bind_conn
+      conn.close if conn
+      @node.unbind(binding)
       @node.restore(db["name"], "/tmp/").should == true
       conn = connect_to_mysql(db)
       res = conn.query("show tables")
       res.count().should == 1
       res.first["Tables_in_#{db['name']}"].should == "test"
+      res = conn.query("show procedure status")
+      res.count().should == 4
+      expect do
+        conn.query("call defaultfunc(@testcount)")
+        conn.query("select @testcount")
+      end.should_not raise_error
+      expect do
+        conn.query("call myfunc(@testcount)")
+        conn.query("select @testcount")
+      end.should_not raise_error # secuirty type should be invoker or a error will be raised.
+      expect do
+        conn.query("call myfunc2(@testcount)")
+        conn.query("select @testcount")
+      end.should_not raise_error
+      expect do
+        conn.query("call myfunc3(@testcount)")
+        conn.query("select @testcount")
+      end.should_not raise_error
       EM.stop
     end
   end
@@ -441,6 +528,7 @@ describe "Mysql server node" do
         line = f.each_line.find {|line| line =~ /MyTestTable/}
         line.should_not be nil
       end
+      @tmpfiles << File.join("/tmp", "#{@db['name']}.sql")
       EM.stop
     end
   end
@@ -454,6 +542,7 @@ describe "Mysql server node" do
       @node.import_instance(db, {}, '/tmp', @default_plan).should == true
       conn = connect_to_mysql(db)
       expect { conn.query('SELECT 1')}.should_not raise_error
+      @tmpfiles << File.join("/tmp", "#{db['name']}.sql")
       EM.stop
     end
   end
@@ -473,7 +562,28 @@ describe "Mysql server node" do
           "binding_options" => @default_opts,
         }
       }
-      result = @node.enable_instance(db, value)
+      @node.enable_instance(db, value).should be_true
+      expect {conn = connect_to_mysql(binding)}.should_not raise_error
+      EM.stop
+    end
+  end
+
+  it "should recreate bindings when update instance handles" do
+    EM.run do
+      db = @node.provision(@default_plan)
+      @test_dbs[db] = []
+      binding = @node.bind(db['name'], @default_opts)
+      @test_dbs[db] << binding
+      conn = connect_to_mysql(binding)
+      @node.disable_instance(db, [binding])
+      expect {conn = connect_to_mysql(binding)}.should raise_error
+      value = {
+        "fake_service_id" => {
+          "credentials" => binding,
+          "binding_options" => @default_opts,
+        }
+      }
+      result = @node.update_instance(db, value)
       result.should be_instance_of Array
       expect {conn = connect_to_mysql(binding)}.should_not raise_error
       EM.stop
@@ -559,56 +669,43 @@ describe "Mysql server node" do
     end
   end
 
-  it "should report node status in healthz" do
+  it "should report node instance status in varz" do
     pending "This test is not capatiable with mysql2 conenction pool."
     EM.run do
-      healthz = @node.healthz_details()
-      healthz[:self].should == "ok"
+      varz = @node.varz_details
+      varz[:instances].each do |name, status|
+        status.shoud  == "ok"
+      end
       node = VCAP::Services::Mysql::Node.new(@opts)
       EM.add_timer(1) do
         node.pool.close
-        healthz = node.healthz_details()
-        healthz[:self].should == "fail"
+        varz = node.varz_details
+        varz[:instances].each do |name, status|
+          status.should == "ok"
+        end
         EM.stop
       end
     end
   end
 
-  it "should report correct health status when user modify instance password" do
+  it "should report instance status in varz" do
     EM.run do
-      conn = connect_to_mysql(@db)
-      a = conn.query("set password for #{@db['user']}@'localhost' = PASSWORD('newpass')")
-      healthz = @node.healthz_details()
-      healthz[:self].should == "ok"
-      healthz[@db['name'].to_sym].should == "password-modified"
-      EM.stop
-    end
-  end
-
-  it "should close extra mysql connections after generate healthz" do
-    EM.run do
-      @node.pool.with_connection do |connection|
-        res = connection.query("show processlist")
-        conns_before_healthz = res.count
-        healthz = @node.healthz_details()
-        healthz.keys.size.should >= 2
-        res = connection.query("show processlist")
-        conns_after_healthz = res.count
-        conns_before_healthz.should == conns_after_healthz
-      end
-      EM.stop
-    end
-  end
-
-  it "should report instance status in healthz" do
-    EM.run do
-      healthz = @node.healthz_details()
+      varz = @node.varz_details()
       instance = @db['name']
-      healthz[instance.to_sym].should == "ok"
+      varz[:instances].each do |name, value|
+        if name == instance.to_sym
+          value.should == "ok"
+        end
+      end
       @node.pool.with_connection do |connection|
         connection.query("Drop database #{instance}")
-        healthz = @node.healthz_details()
-        healthz[instance.to_sym].should == "fail"
+        sleep 1
+        varz = @node.varz_details()
+        varz[:instances].each do |name, value|
+          if name == instance.to_sym
+            value.should == "fail"
+          end
+        end
         # restore db so cleanup code doesn't complain.
         connection.query("create database #{instance}")
       end
@@ -620,7 +717,8 @@ describe "Mysql server node" do
     EM.run do
       provision_served = @node.provision_served
       binding_served = @node.binding_served
-      NUM = 20
+      # Set concurrent threads to pool size. Prevent pool is empty error.
+      NUM = @node.pool.size
       threads = []
       NUM.times do
         threads << Thread.new do
@@ -652,7 +750,65 @@ describe "Mysql server node" do
     end
   end
 
-  after:each do
+  it "should add timeout option to all management mysql connection" do
+    EM.run do
+      opts = @opts.dup
+      origin_timeout = Mysql2::Client.default_timeout
+      timeout = 1
+      opts[:connection_wait_timeout] = timeout
+      node = VCAP::Services::Mysql::Node.new(opts)
+
+      EM.add_timer(2) do
+        begin
+          # server side timeout
+          node.pool.with_connection do |conn|
+            # simulate connection idle
+            sleep (timeout * 5)
+            expect{ conn.query("select 1") }.should raise_error(Mysql2::Error, /MySQL server has gone away/)
+          end
+          # client side timeout
+          node.pool.with_connection do |conn|
+            # override server side timeout
+            conn.query("set @@wait_timeout=10")
+            expect{ conn.query("select sleep(5)") }.should raise_error(Timeout::Error)
+          end
+        ensure
+          # restore original timeout
+          Mysql2::Client.default_timeout = origin_timeout
+          EM.stop
+        end
+      end
+    end
+  end
+
+  it "should works well if timeout is disabled for management mysql connection" do
+    EM.run do
+      opts = @opts.dup
+      origin_timeout = Mysql2::Client.default_timeout
+      opts.delete :connection_wait_timeout
+      node = VCAP::Services::Mysql::Node.new(opts)
+
+      EM.add_timer(2) do
+        begin
+          # server side timeout
+          node.pool.with_connection do |conn|
+            sleep (5)
+            expect{ conn.query("select 1") }.should_not raise_error
+          end
+          # client side timeout
+          node.pool.with_connection do |conn|
+            expect{ conn.query("select sleep(5)") }.should_not raise_error
+          end
+        ensure
+          # restore original timeout
+          Mysql2::Client.default_timeout = origin_timeout
+          EM.stop
+        end
+      end
+    end
+  end
+
+  after :each do
     @test_dbs.keys.each do |db|
       begin
         name = db["name"]
@@ -662,5 +818,11 @@ describe "Mysql server node" do
         @node.logger.info("Error during cleanup #{e}")
       end
     end if @test_dbs
+  end
+
+  after :all do
+    @tmpfiles.each do |tmpfile|
+      FileUtils.rm_r tmpfile
+    end
   end
 end

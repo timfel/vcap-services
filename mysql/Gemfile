@@ -4,7 +4,7 @@ gem "nats"
 gem "datamapper", ">= 0.10.2"
 gem "do_sqlite3", :require => nil
 gem "dm-sqlite-adapter"
-gem 'eventmachine'
+gem 'eventmachine', :git => 'git://github.com/cloudfoundry/eventmachine.git', :branch => 'release-0.12.11-cf'
 gem "em-http-request"
 gem "json"
 gem "mysql2"
@@ -12,17 +12,18 @@ gem "uuidtools"
 gem "ruby-hmac", :require => "hmac-sha1"
 gem "thin"
 gem "sinatra"
-gem "resque-status", "~> 0.2.4"
 gem "rake"
 gem "curb"
 
-gem 'vcap_common', '>= 1.0.8', :require => ['vcap/common', 'vcap/component']
-gem 'vcap_logging', '>=1.0.0', :require => ['vcap/logging']
-gem "vcap_services_base"
+gem 'vcap_common', :require => ['vcap/common', 'vcap/component'], :git => 'git://github.com/cloudfoundry/vcap-common.git', :ref => 'fd6b6d91'
+gem 'vcap_logging', :require => ['vcap/logging'], :git => 'git://github.com/cloudfoundry/common.git', :ref => 'b96ec1192'
+gem 'vcap_services_base', :git => 'git://github.com/cloudfoundry/vcap-services-base.git', :ref => 'db367f31'
+gem 'warden-client', :require => ['warden/client'], :git => 'git://github.com/cloudfoundry/warden.git', :ref => '21f9a32ab50'
+gem 'warden-protocol', :require => ['warden/protocol'], :git => 'git://github.com/cloudfoundry/warden.git', :ref => '21f9a32ab50'
 
 group :test do
   gem "rspec"
-  gem "rcov"
   gem "ci_reporter"
+  gem "simplecov"
+  gem "simplecov-rcov"
 end
-

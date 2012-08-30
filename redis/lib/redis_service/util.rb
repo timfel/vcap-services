@@ -6,28 +6,33 @@ require "redis_error"
 # Redis client library doesn't support renamed command, so we override the functions here.
 class Redis
   def config(config_command_name, action, *args)
-    synchronize do
-      reply = @client.call [config_command_name.to_sym, action, *args]
-
-      if reply.kind_of?(Array) && action == :get
-        Hash[*reply]
-      else
-        reply
+    synchronize do |client|
+      client.call [config_command_name.to_sym, action, *args] do |reply|
+        if reply.kind_of?(Array) && action == :get
+          Hash[*reply]
+        else
+          reply
+        end
       end
     end
   end
 
   def shutdown(shutdown_command_name)
-    synchronize do
-      @client.call [shutdown_command_name.to_sym]
+    synchronize do |client|
+      client.with_reconnect(false) do
+        begin
+          client.call [shutdown_command_name.to_sym]
+        rescue ConnectionError
+          # This means Redis has probably exited.
+          nil
+        end
+      end
     end
-  rescue Errno::ECONNREFUSED => e
-    # Since the shutdown is successful, it will raise this connect refused exception by redis client library.
   end
 
   def save(save_command_name)
-    synchronize do
-      @client.call [save_command_name.to_sym]
+    synchronize do |client|
+      client.call [save_command_name.to_sym]
     end
   end
 end
@@ -48,7 +53,7 @@ module VCAP
           "#{e}: [#{e.backtrace.join(" | ")}]"
         end
 
-        def dump_redis_data(instance, dump_path, gzip_bin=nil)
+        def dump_redis_data(instance, dump_path, gzip_bin=nil, compressed_file_name=nil)
           dir = get_config(instance.port, instance.password, "dir")
           set_config(instance.port, instance.password, "dir", dump_path)
           begin
@@ -67,7 +72,7 @@ module VCAP
           end
           if gzip_bin
             dump_file = File.join(dump_path, "dump.rdb")
-            cmd = "#{gzip_bin} -c #{dump_file} > #{dump_path}/#{instance.name}.gz"
+            cmd = "#{gzip_bin} -c #{dump_file} > #{dump_path}/#{compressed_file_name}"
             on_err = Proc.new do |cmd, code, msg|
               raise "CMD '#{cmd}' exit with code: #{code}. Message: #{msg}"
             end
@@ -78,12 +83,19 @@ module VCAP
         rescue => e
           @logger.error("Error dump instance #{instance.name}: #{fmt_error(e)}")
           nil
+        ensure
+          FileUtils.rm(File.join(dump_path, "dump.rdb")) if gzip_bin
         end
 
-        def import_redis_data(instance, dump_path, base_dir, redis_server_path, gzip_bin=nil)
+        def import_redis_data(instance, dump_path, base_dir, redis_server_path, gzip_bin=nil, compressed_file_name=nil)
+          name = instance.name
+          dump_file = File.join(dump_path, "dump.rdb")
+          temp_file = nil
           if gzip_bin
-            zip_file = File.join(dump_path, "#{instance.name}.gz")
-            cmd = "#{gzip_bin} -d #{zip_file}"
+            # add name in temp file name to prevent file overwritten by other import jobs.
+            temp_file = File.join(dump_path, "#{name}.dump.rdb")
+            zip_file = File.join(dump_path, "#{compressed_file_name}")
+            cmd = "#{gzip_bin} -dc #{zip_file} > #{temp_file}"
             on_err = Proc.new do |cmd, code, msg|
               raise "CMD '#{cmd}' exit with code: #{code}. Message: #{msg}"
             end
@@ -91,12 +103,11 @@ module VCAP
             if res == nil
               return nil
             end
-            FileUtils.mv(File.join(dump_path, instance.name), File.join(dump_path, "dump.rdb"))
+            dump_file = temp_file
           end
           config_path = File.join(base_dir, instance.name, "redis.conf")
-          dump_file = File.join(dump_path, "dump.rdb")
           stop_redis_server(instance)
-          FileUtils.cp(dump_file, File.join(base_dir, instance.name, "data"))
+          FileUtils.cp(dump_file, File.join(base_dir, instance.name, "data", "dump.rdb"))
           pid = fork
           if pid
             @logger.debug("Service #{instance.name} started with pid #{pid}")
@@ -112,6 +123,8 @@ module VCAP
         rescue => e
           @logger.error("Failed in import dumpfile to instance #{instance.name}: #{fmt_error(e)}")
           nil
+        ensure
+          FileUtils.rm_rf temp_file if temp_file
         end
 
         def check_password(port, password)
@@ -185,10 +198,18 @@ module VCAP
             begin
               redis.shutdown(@shutdown_command_name)
             rescue RuntimeError => e
-              # It could be a disabled instance
-              if @disable_password
-                redis = ::Redis.new({:port => instance.port, :password => @disable_password})
-                redis.shutdown(@shutdown_command_name)
+              if e.message == "ERR max number of clients reached"
+                # The max clients limitation could be reached, try to kill the process
+                  instance.kill
+                  instance.wait_killed ?
+                    @logger.debug("Redis server pid: #{instance.pid} terminated") :
+                    @logger.error("Timeout to terminate Redis server pid: #{instance.pid}")
+              else
+                # It could be a disabled instance
+                if @disable_password
+                  redis = ::Redis.new({:port => instance.port, :password => @disable_password})
+                  redis.shutdown(@shutdown_command_name)
+                end
               end
             end
           end
