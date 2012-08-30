@@ -49,7 +49,6 @@ class VCAP::Services::Gemstone::Node
   def pre_send_announcement
     super
     start_local_db
-    start_gemstone
   end
 
   def start_local_db
@@ -57,15 +56,6 @@ class VCAP::Services::Gemstone::Node
     DataMapper::auto_upgrade!
   end
 
-  def start_gemstone
-    `#{@GEMSTONE}/bin/startstone`
-  end
-
-  def shutdown
-    `#{@GEMSTONE}/bin/stopstone`
-    super
-  end
-  
   def announcement
     a = {
       :available_capacity => 42,
@@ -73,6 +63,7 @@ class VCAP::Services::Gemstone::Node
   end
 
   def provision(plan, credential=nil, version=nil)
+    @logger.debug("JGF-1-provision(#{plan.inspect}, #{credential.inspect}, #{version.inspect})")
     provisioned_service = ProvisionedService.new
     if credential
       provisioned_service.name = credential[:name]
@@ -84,10 +75,12 @@ class VCAP::Services::Gemstone::Node
       provisioned_service.pass = generate_credential
     end
     provisioned_service.gems = "!tcp@" + @local_ip + "#server!gs64stone"
+    @logger.debug("JGF-2-#{provisioned_service.inspect}")
 
-    `#{@GEMSTONE}/bin/topaz -I #{@GEMSTONE}/bin/datacurator.tpz <<EOF
+    `#{@GEMSTONE}/bin/topaz -I #{@GEMSTONE}/bin/datacurator.tpz > topaz.out <<EOF
 #{@provision_template.result(binding)}
 EOF`
+    @logger.debug("JGF-3")
 
     if not provisioned_service.save
       @logger.error("Could not save entry: #{provisioned_service.errors.inspect}")
@@ -101,6 +94,7 @@ EOF`
       "host" => @local_ip,
       "port" => 0,
     }
+    @logger.debug("JGF-4-#{response.inspect}")
   end
 
   def unprovision(name, credentials)
