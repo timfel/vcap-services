@@ -43,7 +43,7 @@ class VCAP::Services::Gemstone::Node
     @unprovision_template = ERB.new(File.read(template_path))
     @GEMSTONE = options[:base_dir]
     @local_db = options[:local_db]
-    @supported_versions = ["3.0.1"]
+    @supported_versions = ["3.1.0.1"]
   end
 
   def pre_send_announcement

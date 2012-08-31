@@ -1,12 +1,12 @@
 ---
-cloud_controller_uri: api.vcap.me
+# cloud_controller_uri: api.vcap.me
 service:
   name: gemstone
-  version: '3.0.1'
+  version: '3.1.0.1'
   description: 'GemStone/S 64 Bit database service'
   plans: ['free']
   default_plan: free
-  tags: ['gemstone', 'gemstone-3.0.1', 'objects']
+  tags: ['gemstone', 'gemstone-3.1.0.1', 'objects']
 ip_route: localhost
 index: 0
 token: 'swordfish'

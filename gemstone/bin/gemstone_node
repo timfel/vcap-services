@@ -8,7 +8,6 @@ require 'bundler/setup'
 require 'vcap_services_base'
 
 $LOAD_PATH.unshift(File.expand_path("../../lib", __FILE__))
-# require "gemstone_service/node"
 require "gemstone_service/gemstone_node"
 
 class VCAP::Services::Gemstone::NodeBin < VCAP::Services::Base::NodeBin
